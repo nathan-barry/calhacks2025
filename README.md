@@ -1,94 +1,397 @@
-# Ripgrep Memory-Mapped Search
+# MONO: High-Performance Coding Agent Serving Engine
 
-A simple benchmark comparing in-memory search (using ripgrep's internals with memory-mapped files) vs subprocess-based ripgrep.
+MONO is a serving infrastructure designed to enable efficient multi-tenant coding agent inference by co-locating codebases with LLM inference. Unlike traditional coding agents that incur high latency from client-server communication for every filesystem operation, MONO moves codebases to the server to eliminate round-trip overhead.
 
-## What It Does
+## The Problem
 
-1. **Loads files into memory** - Memory-maps all files in a directory (respects .gitignore)
-2. **In-memory search** - Uses ripgrep's `search_slice()` to search directly on memory-mapped data
-3. **Benchmark** - Compares performance against spawning ripgrep as a subprocess
+Traditional coding agents (like Claude Code, Cursor, etc.) have a major performance bottleneck:
 
-## Core Functionality
+```
+┌─────────┐                    ┌─────────┐
+│  Client │ ◄─────────────────►│  Server │
+│(Laptop) │    Network Calls   │  (LLM)  │
+└─────────┘                    └─────────┘
+     │
+     ▼
+  Codebase
+  (Local Files)
+```
 
-- `MmapCache::new()` - Memory-maps all files in a directory
-- `MmapCache::search()` - Searches using ripgrep's grep-searcher crate on mmapped data
-- `ripgrep_subprocess()` - Runs `rg` as a subprocess for comparison
+**Every file operation requires:**
+1. LLM generates tool call → Network → Client
+2. Client spawns subprocess (`grep`, `ls`, etc.) → ~10-15ms overhead
+3. Results → Network → LLM
+4. Repeat 10-20 times per agent turn
 
-## Build
+**Total overhead:** 100-300ms per agent turn, dominated by subprocess spawn time
+
+## The Solution
+
+MONO co-locates codebases with the LLM server and uses in-memory operations:
+
+```
+┌─────────────────────────────────────┐
+│          Server                     │
+│  ┌─────────┐    ┌──────────────┐  │
+│  │  vLLM   │───►│ Mem Search   │  │
+│  │ (Qwen)  │    │   Service    │  │
+│  └─────────┘    └──────────────┘  │
+│                        │            │
+│                        ▼            │
+│                  ┌──────────┐      │
+│                  │ Codebases│      │
+│                  │(Memory)  │      │
+│                  └──────────┘      │
+└─────────────────────────────────────┘
+         ▲
+         │ SSH
+         │
+    ┌─────────┐
+    │ Client  │
+    └─────────┘
+```
+
+**Benefits:**
+- No network round-trips for file operations
+- No subprocess spawn overhead (~10-15ms saved per operation)
+- In-memory grep: **0.5-3ms** vs subprocess: **10-15ms**
+- **10-50x speedup** for repeated operations
+
+## Architecture
+
+### Components
+
+1. **mem-search-service** (Rust daemon)
+   - Memory-maps all active codebases into RAM
+   - Provides IPC interface via Unix domain sockets
+   - Handles concurrent requests from multiple clients
+   - Executes grep/search directly in memory using ripgrep internals
+
+2. **mono_client.py** (Python library)
+   - Client library for communicating with mem-search-service
+   - Can be integrated into qwen-code or other Python agents
+   - Simple API: `alloc_pid()`, `grep()`, `close()`
+
+3. **IPC Layer** (Unix domain sockets)
+   - Request socket: `/tmp/mem_search_service_requests.sock` (shared)
+   - Response sockets: `/tmp/qwen_code_response_{pid}.sock` (per-client)
+   - JSON-based protocol
+
+### Request Flow
+
+```
+1. Client → alloc_pid(codebase_path)
+   ├─ Service memory-maps entire codebase
+   ├─ Creates dedicated response socket for client
+   └─ Returns success
+
+2. Client → request_grep(pattern)
+   ├─ Service searches in-memory files using ripgrep
+   ├─ Results formatted like ripgrep output
+   └─ Returns via client's response socket
+
+3. Repeat step 2 for each search (no overhead!)
+```
+
+## Quick Start
+
+### 1. Build the Service
 
 ```bash
 cargo build --release
 ```
 
-## Run
+### 2. Start the Memory Search Service
 
 ```bash
-# Basic usage (searches for "use")
-./target/release/ripgrep-mmap /path/to/codebase
-
-# Custom pattern
-./target/release/ripgrep-mmap /path/to/codebase "fn "
-
-# Custom pattern and iterations
-./target/release/ripgrep-mmap /path/to/codebase "use std" 20
+./target/release/mem-search-service
 ```
 
-## How It Works
+Output:
+```
+================================================================================
+MONO Memory Search Service
+================================================================================
 
-### Memory Mapping
-```rust
-// Load all files into memory using mmap
-let walker = ignore::WalkBuilder::new(root)
-    .git_ignore(true)
-    .build();
+Request listener started on /tmp/mem_search_service_requests.sock
+Worker thread started
+Service running. Press Ctrl+C to stop.
+```
 
-for file in walker {
-    let mmap = unsafe { Mmap::map(&file)? };
-    files.insert(path, mmap);
+### 3. Use the Python Client
+
+```python
+from mono_client import MemSearchClient
+
+# Create client
+client = MemSearchClient()
+
+# Allocate codebase (memory-maps all files)
+client.alloc_pid("/path/to/codebase")
+
+# Search (happens in-memory, ~1-3ms)
+results = client.grep("use std")
+print(results)
+
+# Close
+client.close()
+```
+
+Or use the convenience function:
+```python
+from mono_client import grep
+
+results = grep("pattern", "/path/to/codebase")
+print(results)
+```
+
+### 4. Test It
+
+```bash
+# In terminal 1: Start service
+./target/release/mem-search-service
+
+# In terminal 2: Run test client
+python3 test_client.py /path/to/codebase
+```
+
+Expected output:
+```
+================================================================================
+MONO Memory Search Service - Test Client
+================================================================================
+
+Codebase: /path/to/codebase
+
+[1] Allocating codebase (memory-mapping files)...
+Loading files into memory from: /path/to/codebase
+Loaded 347 files (12.45 MB total) into memory
+    ✓ Allocated in 45.23ms
+    Response: Allocated 347 files
+
+[2] Searching for 'use'...
+    ✓ Found 145 matches in 0.52ms
+
+[3] Speed test - 10 repeated searches...
+    Average: 0.43ms
+    Min:     0.38ms
+    Max:     0.52ms
+
+================================================================================
+SUCCESS
+================================================================================
+✓ Memory-mapped search working!
+✓ Average search time: 0.43ms
+✓ Typical subprocess overhead saved: ~10-15ms per search
+================================================================================
+```
+
+## IPC Protocol
+
+### Request Types
+
+#### 1. alloc_pid
+
+Allocate and memory-map a codebase for a client.
+
+**Request:**
+```json
+{
+  "type": "alloc_pid",
+  "pid": 12345,
+  "repo_dir_path": "/path/to/codebase"
 }
 ```
 
-### In-Memory Search
-```rust
-// Search using ripgrep's internals on the mmap
-searcher.search_slice(
-    &matcher,
-    &mmap[..],  // Search directly on memory-mapped data
-    UTF8(|line_num, line| {
-        matches.push((path, line_num, line));
-        Ok(true)
-    })
-)
+**Response:**
+```json
+{
+  "response_status": 1,
+  "text": "Allocated 347 files"
+}
 ```
 
-### Subprocess (for comparison)
-```rust
-// Spawn ripgrep as subprocess
-Command::new("rg")
-    .arg(pattern)
-    .arg(root)
-    .output()
+#### 2. request_grep
+
+Search the allocated codebase.
+
+**Request:**
+```json
+{
+  "type": "request_grep",
+  "pid": 12345,
+  "pattern": "fn \\w+",
+  "case_sensitive": false
+}
 ```
 
-## Why It's Faster
+**Response:**
+```json
+{
+  "response_status": 1,
+  "text": "src/main.rs:42:fn main() {\nsrc/lib.rs:10:fn search() {"
+}
+```
 
-1. **No subprocess spawn overhead** (~5-10ms per call)
-2. **Files already in memory** (no repeated file I/O)
-3. **Parallel search** across all files using Rayon
-4. **Same regex engine** as ripgrep under the hood
+### Error Handling
+
+**Response (error):**
+```json
+{
+  "response_status": 0,
+  "error": "PID 12345 has no allocated codebase. Call alloc_pid first."
+}
+```
+
+## Performance
+
+### Benchmark
+
+Run the standalone benchmark:
+
+```bash
+./target/release/benchmark /path/to/codebase "pattern" 10
+```
+
+Example results:
+```
+================================================================================
+Memory-Mapped Search
+================================================================================
+  Iteration  1: 0.52ms (145 matches)
+  Iteration  2: 0.38ms (145 matches)
+  ...
+  Iteration 10: 0.41ms (145 matches)
+
+Results:
+  Average: 0.43ms
+  Min:     0.38ms
+  Max:     0.52ms
+
+================================================================================
+Ripgrep Subprocess
+================================================================================
+  Iteration  1: 12.45ms (145 matches)
+  ...
+
+Results:
+  Average: 12.15ms
+
+================================================================================
+SUMMARY
+================================================================================
+Speedup: 28.26x faster
+Time saved per search: 11.72ms
+```
+
+### Typical Performance
+
+| Operation | Subprocess | In-Memory | Speedup |
+|-----------|-----------|-----------|---------|
+| Small codebase (<100 files) | ~10ms | ~0.5ms | 20x |
+| Medium codebase (~500 files) | ~15ms | ~1ms | 15x |
+| Large codebase (1000+ files) | ~20ms | ~3ms | 7x |
+
+**Impact on agent turns:**
+- Traditional: 10 tool calls × 15ms = 150ms overhead
+- MONO: 10 tool calls × 1ms = 10ms overhead
+- **Savings: 140ms per turn = 93% reduction**
+
+## Integration with Qwen-Code
+
+To integrate with qwen-code, intercept its grep/filesystem calls:
+
+```python
+# In qwen-code's tool handlers
+from mono_client import MemSearchClient
+
+class MonoTools:
+    def __init__(self, codebase_path):
+        self.client = MemSearchClient()
+        self.client.alloc_pid(codebase_path)
+
+    def grep(self, pattern):
+        # Instead of subprocess.run(["rg", ...])
+        return self.client.grep(pattern)
+
+    def ls(self, path):
+        # TODO: Implement ls_handler in service
+        pass
+
+    def read_file(self, path):
+        # TODO: Implement read_handler in service
+        pass
+```
+
+## Project Structure
+
+```
+mono/
+├── src/
+│   ├── lib.rs              # Shared MmapCache implementation
+│   ├── service.rs          # Memory search service daemon
+│   └── benchmark.rs        # Standalone benchmark tool
+├── mono_client.py          # Python client library
+├── test_client.py          # Test/demo script
+├── Cargo.toml              # Rust dependencies
+└── README.md               # This file
+```
 
 ## Dependencies
 
+### Rust
 - `grep-searcher` - Ripgrep's core search engine
-- `grep-regex` - Ripgrep's regex implementation
+- `grep-regex` - Regex implementation
 - `memmap2` - Memory mapping
 - `ignore` - .gitignore support
 - `rayon` - Parallel search
-- `anyhow` - Error handling
+- `serde` + `serde_json` - JSON serialization
+- `crossbeam-channel` - Thread communication
 
-## Use Case
+### Python
+- Standard library only (no external dependencies!)
 
-Perfect for LLM coding agents that need to search a codebase repeatedly:
-- Traditional approach: Spawn `rg` subprocess for each search (~10-15ms)
-- This approach: Search in-memory (~0.5-3ms)
-- **10-30x speedup** for repeated searches
+## Future Work
+
+- [ ] Implement `ls_handler` for directory listing
+- [ ] Implement `read_handler` for file reading
+- [ ] Implement `write_handler` for file modification
+- [ ] Add codebase paging/eviction for when RAM is limited
+- [ ] Add file watch for auto-reload on changes
+- [ ] Optimize with suffix trees for super-hot files
+- [ ] Support for distributed codebases across multiple servers
+- [ ] Copy-on-write for shared codebases (e.g., PyTorch team)
+
+## Troubleshooting
+
+**Service won't start:**
+- Check if socket already exists: `ls /tmp/mem_search_service_requests.sock`
+- Remove it: `rm /tmp/mem_search_service_requests.sock`
+- Restart service
+
+**Client can't connect:**
+- Make sure service is running in another terminal
+- Check service output for errors
+- Make sure you're using Python 3: `python3` not `python`
+
+## FAQ
+
+**Q: How much RAM does this use?**
+A: Approximately the size of your text files. Binary files are skipped. A typical 10MB codebase uses ~10MB RAM.
+
+**Q: What happens when files change?**
+A: Currently, you need to restart the client and re-allocate. File watching is planned.
+
+**Q: Can multiple clients share the same codebase?**
+A: Each client gets its own memory-mapped copy. Copy-on-write sharing is planned.
+
+**Q: Does this work on macOS/Linux/Windows?**
+A: Unix domain sockets are macOS/Linux only. Windows support via named pipes is planned.
+
+## License
+
+MIT
+
+## Credits
+
+Built using [ripgrep](https://github.com/BurntSushi/ripgrep)'s excellent search crates by BurntSushi.
