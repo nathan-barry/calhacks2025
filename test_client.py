@@ -5,7 +5,7 @@ Test client for MONO memory search service.
 This demonstrates the full IPC workflow:
 1. Client connects to service
 2. Client allocates a codebase (memory-mapped)
-3. Client performs grep searches
+3. Client performs ripgrep searches
 4. Results are returned instantly from memory
 """
 
@@ -49,7 +49,7 @@ def main():
         for pattern, case_sensitive in test_patterns:
             print(f"[2] Searching for '{pattern}'...")
             start = time.time()
-            results = client.grep(pattern, case_sensitive)
+            results = client.ripgrep(pattern, case_sensitive)
             search_time = (time.time() - start) * 1000
 
             num_matches = len(results.strip().split("\n")) if results.strip() else 0
@@ -67,7 +67,7 @@ def main():
         pattern = "use"
         for i in range(10):
             start = time.time()
-            results = client.grep(pattern)
+            results = client.ripgrep(pattern)
             elapsed = (time.time() - start) * 1000
             times.append(elapsed)
 

@@ -21,8 +21,8 @@ enum Request {
         pid: u32,
         repo_dir_path: String,
     },
-    #[serde(rename = "request_grep")]
-    RequestGrep {
+    #[serde(rename = "request_ripgrep")]
+    RequestRipgrep {
         pid: u32,
         pattern: String,
         #[serde(default)]
@@ -129,8 +129,8 @@ fn handle_alloc_pid(
     }
 }
 
-/// Handle request_grep request
-fn handle_grep(
+/// Handle request_ripgrep request
+fn handle_ripgrep(
     state: &ServiceState,
     pid: u32,
     pattern: String,
@@ -242,11 +242,11 @@ fn request_worker(request_rx: Receiver<(Request, UnixStream)>) -> Result<()> {
                     Request::AllocPid { pid, repo_dir_path } => {
                         (pid, handle_alloc_pid(&mut state, pid, repo_dir_path))
                     }
-                    Request::RequestGrep {
+                    Request::RequestRipgrep {
                         pid,
                         pattern,
                         case_sensitive,
-                    } => (pid, handle_grep(&state, pid, pattern, case_sensitive)),
+                    } => (pid, handle_ripgrep(&state, pid, pattern, case_sensitive)),
                 };
 
                 match response {

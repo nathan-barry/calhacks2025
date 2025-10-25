@@ -1,6 +1,6 @@
 # MONO: High-Performance Coding Agent Serving Engine
 
-MONO is a serving infrastructure designed to enable efficient multi-tenant coding agent inference by co-locating codebases with LLM inference. Unlike traditional coding agents that incur high latency from client-server communication for every filesystem operation, MONO moves codebases to the server to eliminate round-trip overhead.
+MONO eliminates the ripgrep bottleneck in LLM coding agents by keeping codebases memory-mapped and executing searches in-memory. Instead of spawning a subprocess for every `rg` call (~10-15ms overhead), MONO searches directly in RAM (~0.5-3ms).
 
 ## The Problem
 
@@ -17,11 +17,11 @@ Traditional coding agents (like Claude Code, Cursor, etc.) have a major performa
   (Local Files)
 ```
 
-**Every file operation requires:**
+**Every ripgrep call requires:**
 1. LLM generates tool call → Network → Client
-2. Client spawns subprocess (`grep`, `ls`, etc.) → ~10-15ms overhead
+2. Client spawns `rg` subprocess → ~10-15ms overhead
 3. Results → Network → LLM
-4. Repeat 10-20 times per agent turn
+4. Repeat 10-20 times per agent turn (ripgrep is the most common tool)
 
 **Total overhead:** 100-300ms per agent turn, dominated by subprocess spawn time
 
@@ -52,10 +52,10 @@ MONO co-locates codebases with the LLM server and uses in-memory operations:
 ```
 
 **Benefits:**
-- No network round-trips for file operations
-- No subprocess spawn overhead (~10-15ms saved per operation)
-- In-memory grep: **0.5-3ms** vs subprocess: **10-15ms**
-- **10-50x speedup** for repeated operations
+- No subprocess spawn overhead (~10-15ms saved per search)
+- In-memory ripgrep: **0.5-3ms** vs subprocess: **10-15ms**
+- **10-50x speedup** for search operations
+- Multi-tenant: one service handles multiple qwen-code instances
 
 ## Architecture
 
@@ -65,12 +65,12 @@ MONO co-locates codebases with the LLM server and uses in-memory operations:
    - Memory-maps all active codebases into RAM
    - Provides IPC interface via Unix domain sockets
    - Handles concurrent requests from multiple clients
-   - Executes grep/search directly in memory using ripgrep internals
+   - Executes ripgrep search directly in memory using ripgrep internals
 
 2. **mono_client.py** (Python library)
    - Client library for communicating with mem-search-service
    - Can be integrated into qwen-code or other Python agents
-   - Simple API: `alloc_pid()`, `grep()`, `close()`
+   - Simple API: `alloc_pid()`, `ripgrep()`, `close()`
 
 3. **IPC Layer** (Unix domain sockets)
    - Request socket: `/tmp/mem_search_service_requests.sock` (shared)
@@ -85,7 +85,7 @@ MONO co-locates codebases with the LLM server and uses in-memory operations:
    ├─ Creates dedicated response socket for client
    └─ Returns success
 
-2. Client → request_grep(pattern)
+2. Client → request_ripgrep(pattern)
    ├─ Service searches in-memory files using ripgrep
    ├─ Results formatted like ripgrep output
    └─ Returns via client's response socket
@@ -130,7 +130,7 @@ client = MemSearchClient()
 client.alloc_pid("/path/to/codebase")
 
 # Search (happens in-memory, ~1-3ms)
-results = client.grep("use std")
+results = client.ripgrep("use std")
 print(results)
 
 # Close
@@ -139,9 +139,9 @@ client.close()
 
 Or use the convenience function:
 ```python
-from mono_client import grep
+from mono_client import ripgrep
 
-results = grep("pattern", "/path/to/codebase")
+results = ripgrep("pattern", "/path/to/codebase")
 print(results)
 ```
 
@@ -211,14 +211,14 @@ Allocate and memory-map a codebase for a client.
 }
 ```
 
-#### 2. request_grep
+#### 2. request_ripgrep
 
 Search the allocated codebase.
 
 **Request:**
 ```json
 {
-  "type": "request_grep",
+  "type": "request_ripgrep",
   "pid": 12345,
   "pattern": "fn \\w+",
   "case_sensitive": false
@@ -299,28 +299,22 @@ Time saved per search: 11.72ms
 
 ## Integration with Qwen-Code
 
-To integrate with qwen-code, intercept its grep/filesystem calls:
+To integrate with qwen-code, replace only the ripgrep tool call:
 
 ```python
 # In qwen-code's tool handlers
 from mono_client import MemSearchClient
 
-class MonoTools:
+class ModifiedRipgrepHandler:
     def __init__(self, codebase_path):
         self.client = MemSearchClient()
         self.client.alloc_pid(codebase_path)
 
-    def grep(self, pattern):
-        # Instead of subprocess.run(["rg", ...])
-        return self.client.grep(pattern)
+    def ripgrep(self, pattern):
+        # Replace subprocess ripgrep with in-memory search
+        return self.client.ripgrep(pattern)
 
-    def ls(self, path):
-        # TODO: Implement ls_handler in service
-        pass
-
-    def read_file(self, path):
-        # TODO: Implement read_handler in service
-        pass
+# All other tools (ls, cat, etc.) use default qwen-code implementation
 ```
 
 ## Project Structure
@@ -353,11 +347,8 @@ mono/
 
 ## Future Work
 
-- [ ] Implement `ls_handler` for directory listing
-- [ ] Implement `read_handler` for file reading
-- [ ] Implement `write_handler` for file modification
-- [ ] Add codebase paging/eviction for when RAM is limited
 - [ ] Add file watch for auto-reload on changes
+- [ ] Add codebase paging/eviction for when RAM is limited
 - [ ] Optimize with suffix trees for super-hot files
 - [ ] Support for distributed codebases across multiple servers
 - [ ] Copy-on-write for shared codebases (e.g., PyTorch team)
@@ -380,7 +371,7 @@ mono/
 A: Approximately the size of your text files. Binary files are skipped. A typical 10MB codebase uses ~10MB RAM.
 
 **Q: What happens when files change?**
-A: Currently, you need to restart the client and re-allocate. File watching is planned.
+A: In-place edits are visible automatically. However, most text editors atomically replace files (creating new inodes), so you'll need to restart the client and re-allocate. File watching for auto-reload is planned.
 
 **Q: Can multiple clients share the same codebase?**
 A: Each client gets its own memory-mapped copy. Copy-on-write sharing is planned.

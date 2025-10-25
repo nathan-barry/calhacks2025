@@ -3,7 +3,7 @@ MONO Memory Search Service Client
 
 Python client library for communicating with the mem-search-service daemon.
 This can be used by qwen-code or any other Python process to perform
-in-memory grep operations on codebases.
+in-memory ripgrep operations on codebases.
 """
 
 import json
@@ -19,7 +19,7 @@ class MemSearchClient:
     Usage:
         client = MemSearchClient()
         client.alloc_pid("/path/to/codebase")
-        results = client.grep("pattern")
+        results = client.ripgrep("pattern")
         client.close()
     """
 
@@ -128,9 +128,9 @@ class MemSearchClient:
             error = response.get("error", "Unknown error")
             raise RuntimeError(f"Failed to allocate codebase: {error}")
 
-    def grep(self, pattern, case_sensitive=False):
+    def ripgrep(self, pattern, case_sensitive=False):
         """
-        Search the allocated codebase for a pattern.
+        Search the allocated codebase for a pattern using ripgrep.
 
         Args:
             pattern: Regex pattern to search for
@@ -147,9 +147,9 @@ class MemSearchClient:
                 "No codebase allocated. Call alloc_pid() first."
             )
 
-        # Send grep request
+        # Send ripgrep request
         request = {
-            "type": "request_grep",
+            "type": "request_ripgrep",
             "pid": self.pid,
             "pattern": pattern,
             "case_sensitive": case_sensitive,
@@ -209,9 +209,9 @@ class MemSearchClient:
         self.close()
 
 
-def grep(pattern, codebase_path=None, case_sensitive=False):
+def ripgrep(pattern, codebase_path=None, case_sensitive=False):
     """
-    Convenience function for one-off grep operations.
+    Convenience function for one-off ripgrep operations.
 
     Args:
         pattern: Regex pattern to search for
@@ -226,7 +226,7 @@ def grep(pattern, codebase_path=None, case_sensitive=False):
 
     with MemSearchClient() as client:
         client.alloc_pid(codebase_path)
-        return client.grep(pattern, case_sensitive)
+        return client.ripgrep(pattern, case_sensitive)
 
 
 if __name__ == "__main__":
@@ -245,7 +245,7 @@ if __name__ == "__main__":
     print(f"Searching for '{pattern}' in {codebase}")
     print("=" * 80)
 
-    results = grep(pattern, codebase)
+    results = ripgrep(pattern, codebase)
 
     if results:
         print(results)
