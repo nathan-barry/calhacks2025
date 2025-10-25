@@ -1,6 +1,6 @@
-# MONO: High-Performance Coding Agent Serving Engine
+# CURSERVE: High-Performance Coding Agent Serving Engine
 
-MONO eliminates the ripgrep bottleneck in LLM coding agents by keeping codebases memory-mapped and executing searches in-memory. Instead of spawning a subprocess for every `rg` call (~10-15ms overhead), MONO searches directly in RAM (~0.5-3ms).
+CURSERVE eliminates the ripgrep bottleneck in LLM coding agents by keeping codebases memory-mapped and executing searches in-memory. Instead of spawning a subprocess for every `rg` call (~10-15ms overhead), CURSERVE searches directly in RAM (~0.5-3ms).
 
 ## The Problem
 
@@ -27,7 +27,7 @@ Traditional coding agents (like Claude Code, Cursor, etc.) have a major performa
 
 ## The Solution
 
-MONO co-locates codebases with the LLM server and uses in-memory operations:
+CURSERVE co-locates codebases with the LLM server and uses in-memory operations:
 
 ```
 ┌─────────────────────────────────────┐
@@ -110,7 +110,7 @@ cargo build --release
 Output:
 ```
 ================================================================================
-MONO Memory Search Service
+CURSERVE Memory Search Service
 ================================================================================
 
 Request listener started on /tmp/mem_search_service_requests.sock
@@ -121,7 +121,7 @@ Service running. Press Ctrl+C to stop.
 ### 3. Use the Python Client
 
 ```python
-from mono_client import MemSearchClient
+from curserve_client import MemSearchClient
 
 # Create client
 client = MemSearchClient()
@@ -139,7 +139,7 @@ client.close()
 
 Or use the convenience function:
 ```python
-from mono_client import ripgrep
+from curserve_client import ripgrep
 
 results = ripgrep("pattern", "/path/to/codebase")
 print(results)
@@ -158,7 +158,7 @@ python3 test_client.py /path/to/codebase
 Expected output:
 ```
 ================================================================================
-MONO Memory Search Service - Test Client
+CURSERVE Memory Search Service - Test Client
 ================================================================================
 
 Codebase: /path/to/codebase
@@ -294,7 +294,7 @@ Time saved per search: 11.72ms
 
 **Impact on agent turns:**
 - Traditional: 10 tool calls × 15ms = 150ms overhead
-- MONO: 10 tool calls × 1ms = 10ms overhead
+- CURSERVE: 10 tool calls × 1ms = 10ms overhead
 - **Savings: 140ms per turn = 93% reduction**
 
 ## Integration with Qwen-Code
@@ -303,7 +303,7 @@ To integrate with qwen-code, replace only the ripgrep tool call:
 
 ```python
 # In qwen-code's tool handlers
-from mono_client import MemSearchClient
+from curserve_client import MemSearchClient
 
 class ModifiedRipgrepHandler:
     def __init__(self, codebase_path):
@@ -320,12 +320,12 @@ class ModifiedRipgrepHandler:
 ## Project Structure
 
 ```
-mono/
+curserve/
 ├── src/
 │   ├── lib.rs              # Shared MmapCache implementation
 │   ├── service.rs          # Memory search service daemon
 │   └── benchmark.rs        # Standalone benchmark tool
-├── mono_client.py          # Python client library
+├── curserve_client.py      # Python client library
 ├── test_client.py          # Test/demo script
 ├── Cargo.toml              # Rust dependencies
 └── README.md               # This file

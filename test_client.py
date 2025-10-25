@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test client for MONO memory search service.
+Test client for CURSERVE memory search service.
 
 This demonstrates the full IPC workflow:
 1. Client connects to service
@@ -10,12 +10,12 @@ This demonstrates the full IPC workflow:
 """
 
 import time
-from mono_client import MemSearchClient
+from curserve_client import MemSearchClient
 
 
 def main():
     print("=" * 80)
-    print("MONO Memory Search Service - Test Client")
+    print("CURSERVE Memory Search Service - Test Client")
     print("=" * 80)
     print()
 

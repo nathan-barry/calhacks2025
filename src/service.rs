@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
-use mono::MmapCache;
+use curserve::MmapCache;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -275,7 +275,7 @@ fn request_worker(request_rx: Receiver<(Request, UnixStream)>) -> Result<()> {
 
 fn main() -> Result<()> {
     println!("{}", "=".repeat(80));
-    println!("MONO Memory Search Service");
+    println!("CURSERVE Memory Search Service");
     println!("{}", "=".repeat(80));
     println!();
 

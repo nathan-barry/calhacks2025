@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use mono::MmapCache;
+use curserve::MmapCache;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};

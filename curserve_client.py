@@ -1,5 +1,5 @@
 """
-MONO Memory Search Service Client
+CURSERVE Memory Search Service Client
 
 Python client library for communicating with the mem-search-service daemon.
 This can be used by qwen-code or any other Python process to perform
@@ -14,7 +14,7 @@ import threading
 
 class MemSearchClient:
     """
-    Client for communicating with the MONO memory search service.
+    Client for communicating with the CURSERVE memory search service.
 
     Usage:
         client = MemSearchClient()
@@ -122,7 +122,7 @@ class MemSearchClient:
 
         if response["response_status"] == 1:
             self._allocated = True
-            print(f"[MONO] Allocated codebase: {repo_dir_path}")
+            print(f"[CURSERVE] Allocated codebase: {repo_dir_path}")
             return response
         else:
             error = response.get("error", "Unknown error")
@@ -234,9 +234,9 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 3:
-        print("Usage: python mono_client.py <codebase_path> <pattern>")
+        print("Usage: python curserve_client.py <codebase_path> <pattern>")
         print("\nExample:")
-        print("  python mono_client.py /path/to/repo 'use std'")
+        print("  python curserve_client.py /path/to/repo 'use std'")
         sys.exit(1)
 
     codebase = sys.argv[1]

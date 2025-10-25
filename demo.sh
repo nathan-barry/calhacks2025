@@ -1,11 +1,11 @@
 #!/bin/bash
-# MONO Demo Script
-# This script demonstrates the full MONO system
+# CURSERVE Demo Script
+# This script demonstrates the full CURSERVE system
 
 set -e
 
 echo "================================================================================"
-echo "MONO Demo - High-Performance Coding Agent Serving Engine"
+echo "CURSERVE Demo - High-Performance Coding Agent Serving Engine"
 echo "================================================================================"
 echo ""
 
