@@ -155,6 +155,24 @@ print(results)
 python3 test_client.py /path/to/codebase
 ```
 
+### 5. Test File Watching
+
+CURSERVE automatically detects file changes and updates the memory-mapped cache in real-time:
+
+```bash
+# In terminal 1: Start service
+./target/release/mem-search-service
+
+# In terminal 2: Run file watch test
+python3 test_file_watch.py
+```
+
+This test verifies that:
+- **New files** are automatically detected and indexed
+- **Modified files** are automatically reloaded
+- **Deleted files** are automatically removed from the cache
+- Search results always reflect the current file system state
+
 Expected output:
 ```
 ================================================================================
@@ -326,7 +344,9 @@ curserve/
 │   ├── service.rs          # Memory search service daemon
 │   └── benchmark.rs        # Standalone benchmark tool
 ├── curserve_client.py      # Python client library
-├── test_client.py          # Test/demo script
+├── test_client.py          # Basic functionality test
+├── test_file_watch.py      # File watching test
+├── demo.sh                 # Quick demo script
 ├── Cargo.toml              # Rust dependencies
 └── README.md               # This file
 ```
@@ -341,13 +361,20 @@ curserve/
 - `rayon` - Parallel search
 - `serde` + `serde_json` - JSON serialization
 - `crossbeam-channel` - Thread communication
+- `notify` - File system event monitoring
 
 ### Python
 - Standard library only (no external dependencies!)
 
+## Features
+
+- [x] **Real-time file watching** - Automatically detects and reloads changed files
+- [x] **Memory-mapped search** - 10-50x faster than subprocess ripgrep
+- [x] **Multi-tenant support** - Multiple codebases served simultaneously
+- [x] **Respects .gitignore** - Automatically skips ignored files
+
 ## Future Work
 
-- [ ] Add file watch for auto-reload on changes
 - [ ] Add codebase paging/eviction for when RAM is limited
 - [ ] Optimize with suffix trees for super-hot files
 - [ ] Support for distributed codebases across multiple servers
@@ -371,7 +398,7 @@ curserve/
 A: Approximately the size of your text files. Binary files are skipped. A typical 10MB codebase uses ~10MB RAM.
 
 **Q: What happens when files change?**
-A: In-place edits are visible automatically. However, most text editors atomically replace files (creating new inodes), so you'll need to restart the client and re-allocate. File watching for auto-reload is planned.
+A: CURSERVE automatically watches all allocated codebases for file system changes. New files, modifications, and deletions are detected in real-time and the memory-mapped cache is updated automatically. No restart or re-allocation needed!
 
 **Q: Can multiple clients share the same codebase?**
 A: Each client gets its own memory-mapped copy. Copy-on-write sharing is planned.

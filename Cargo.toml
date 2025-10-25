@@ -34,3 +34,6 @@ serde_json = "1.0"
 
 # Thread communication
 crossbeam-channel = "0.5"
+
+# File watching for auto-reload
+notify = "6.1"

@@ -86,6 +86,86 @@ impl MmapCache {
         })
     }
 
+    /// Add or reload a single file in the cache
+    pub fn reload_file(&mut self, path: &Path) -> Result<()> {
+        // Skip if not a file
+        if !path.is_file() {
+            return Ok(());
+        }
+
+        // Skip binary files
+        if let Some(ext) = path.extension() {
+            let ext_str = ext.to_string_lossy();
+            if matches!(
+                ext_str.as_ref(),
+                "png" | "jpg" | "jpeg" | "gif" | "pdf" | "zip" | "tar" | "gz" |
+                "so" | "dylib" | "dll" | "exe" | "bin" | "o" | "a"
+            ) {
+                return Ok(());
+            }
+        }
+
+        // Find and remove any existing entries for this file
+        // (handles case where path format differs between initial load and file watcher)
+        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        let mut keys_to_remove = Vec::new();
+
+        for key in self.files.keys() {
+            let key_canonical = key.canonicalize().unwrap_or_else(|_| key.clone());
+            if key_canonical == canonical_path {
+                keys_to_remove.push(key.clone());
+            }
+        }
+
+        for key in keys_to_remove {
+            self.files.remove(&key);
+        }
+
+        match File::open(path) {
+            Ok(file) => {
+                let metadata = file.metadata()?;
+                let file_size = metadata.len();
+
+                // Skip very large files (>50MB) and empty files
+                if file_size > 50 * 1024 * 1024 || file_size == 0 {
+                    return Ok(());
+                }
+
+                match unsafe { Mmap::map(&file) } {
+                    Ok(mmap) => {
+                        println!("[FileWatch] Reloaded: {}", path.display());
+                        self.files.insert(path.to_owned(), mmap);
+                        Ok(())
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to mmap file: {}", e)),
+                }
+            }
+            Err(e) => {
+                // File was deleted, already removed above
+                Err(anyhow::anyhow!("Failed to open file: {}", e))
+            }
+        }
+    }
+
+    /// Remove a file from the cache
+    pub fn remove_file(&mut self, path: &Path) {
+        // Find all entries that match this file canonically
+        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        let mut keys_to_remove = Vec::new();
+
+        for key in self.files.keys() {
+            let key_canonical = key.canonicalize().unwrap_or_else(|_| key.clone());
+            if key_canonical == canonical_path {
+                keys_to_remove.push(key.clone());
+            }
+        }
+
+        for key in keys_to_remove {
+            self.files.remove(&key);
+            println!("[FileWatch] Removed: {}", key.display());
+        }
+    }
+
     /// Search all memory-mapped files for the given pattern
     pub fn search(&self, pattern: &str, case_sensitive: bool) -> Result<Vec<(String, u64, String)>> {
         let matcher = RegexMatcherBuilder::new()
