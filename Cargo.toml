@@ -1,0 +1,21 @@
+[package]
+name = "ripgrep-mmap"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Ripgrep crates for searching
+grep-searcher = "0.1"
+grep-regex = "0.1"
+
+# Memory mapping
+memmap2 = "0.9"
+
+# Directory walking and file filtering
+ignore = "0.4"
+
+# Error handling
+anyhow = "1.0"
+
+# Parallel search
+rayon = "1.10"
