@@ -64,6 +64,8 @@ struct ServiceState {
     codebases: HashMap<u32, MmapCache>,
     /// Mapping from PID to response socket stream
     response_sockets: HashMap<u32, UnixStream>,
+    /// Mapping from PID to response socket listener (for accepting connections)
+    response_listeners: HashMap<u32, UnixListener>,
 }
 
 impl ServiceState {
@@ -71,6 +73,7 @@ impl ServiceState {
         Self {
             codebases: HashMap::new(),
             response_sockets: HashMap::new(),
+            response_listeners: HashMap::new(),
         }
     }
 }
@@ -97,26 +100,21 @@ fn handle_alloc_pid(
         Ok(cache) => {
             state.codebases.insert(pid, cache);
 
-            // Create and connect to response socket
+            // Create response socket listener
             let response_socket_path = format!("/tmp/qwen_code_response_{}.sock", pid);
 
             // Remove old socket if it exists
             let _ = fs::remove_file(&response_socket_path);
 
-            // Create the socket
+            // Create the socket listener (but don't wait for connections here)
             let listener = UnixListener::bind(&response_socket_path)
                 .context("Failed to bind response socket")?;
 
-            println!("[PID {}] Waiting for client to connect to {}", pid, response_socket_path);
+            state.response_listeners.insert(pid, listener);
 
-            // Wait for the client to connect (blocking)
-            let (stream, _) = listener.accept()
-                .context("Failed to accept connection on response socket")?;
+            println!("[PID {}] Response socket created at {}", pid, response_socket_path);
 
-            state.response_sockets.insert(pid, stream);
-
-            println!("[PID {}] Client connected successfully", pid);
-
+            // Return success immediately - client will connect to response socket after receiving this response
             Ok(Response::success(Some(format!(
                 "Allocated {} files",
                 state.codebases.get(&pid).unwrap().files.len()
@@ -181,6 +179,16 @@ fn send_response(state: &mut ServiceState, pid: u32, response: &Response) -> Res
     Ok(())
 }
 
+/// Send response directly on a given stream (used for alloc_pid responses)
+fn send_response_on_stream(stream: &mut UnixStream, response: &Response) -> Result<()> {
+    let json = serde_json::to_string(response)?;
+    stream.write_all(json.as_bytes())?;
+    stream.write_all(b"\n")?; // Newline delimiter
+    stream.flush()?;
+
+    Ok(())
+}
+
 /// Request listener thread - receives requests and adds to queue
 fn request_listener(request_tx: Sender<(Request, UnixStream)>) -> Result<()> {
     // Remove old socket if it exists
@@ -227,35 +235,87 @@ fn request_listener(request_tx: Sender<(Request, UnixStream)>) -> Result<()> {
     Ok(())
 }
 
-/// Main worker thread - processes requests from queue
-fn request_worker(request_rx: Receiver<(Request, UnixStream)>) -> Result<()> {
-    let state = Arc::new(Mutex::new(ServiceState::new()));
+/// Connection acceptor thread - accepts connections on response sockets
+fn connection_acceptor(state: Arc<Mutex<ServiceState>>) -> Result<()> {
+    println!("Connection acceptor thread started");
 
+    loop {
+        let mut state = state.lock().unwrap();
+
+        // Check all listeners for pending connections
+        let mut connections = Vec::new();
+        for (&pid, listener) in &state.response_listeners {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    println!("[PID {}] Client connected successfully", pid);
+                    connections.push((pid, stream));
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No pending connection, continue
+                }
+                Err(e) => {
+                    eprintln!("[PID {}] Error accepting connection: {}", pid, e);
+                }
+            }
+        }
+
+        if !connections.is_empty() {
+            println!("Accepted {} connections", connections.len());
+        }
+
+        // Apply connections to state
+        for (pid, stream) in connections {
+            state.response_sockets.insert(pid, stream);
+            state.response_listeners.remove(&pid);
+        }
+
+        drop(state); // Release lock
+
+        // No sleep - poll continuously for connections
+        // This ensures we accept connections as soon as they arrive
+    }
+}
+
+/// Main worker thread - processes requests from queue
+fn request_worker(request_rx: Receiver<(Request, UnixStream)>, state: Arc<Mutex<ServiceState>>) -> Result<()> {
     println!("Worker thread started");
 
     loop {
         match request_rx.recv() {
-            Ok((request, _stream)) => {
+            Ok((request, stream)) => {
                 let mut state = state.lock().unwrap();
 
-                let (pid, response) = match request {
+                let (pid, response, is_alloc_pid) = match &request {
                     Request::AllocPid { pid, repo_dir_path } => {
-                        (pid, handle_alloc_pid(&mut state, pid, repo_dir_path))
+                        (*pid, handle_alloc_pid(&mut state, *pid, repo_dir_path.clone()), true)
                     }
                     Request::RequestRipgrep {
                         pid,
                         pattern,
                         case_sensitive,
-                    } => (pid, handle_ripgrep(&state, pid, pattern, case_sensitive)),
+                    } => (*pid, handle_ripgrep(&state, *pid, pattern.clone(), *case_sensitive), false),
                 };
 
                 match response {
                     Ok(resp) => {
-                        if let Err(e) = send_response(&mut state, pid, &resp) {
-                            eprintln!("[PID {}] Failed to send response: {}", pid, e);
-                            // Clean up dead socket
-                            state.response_sockets.remove(&pid);
-                            state.codebases.remove(&pid);
+                        if is_alloc_pid {
+                            // For alloc_pid, send response directly on the request stream
+                            if let Err(e) = send_response_on_stream(&mut stream.try_clone()?, &resp) {
+                                eprintln!("[PID {}] Failed to send alloc_pid response: {}", pid, e);
+                                // Clean up failed allocation
+                                state.response_sockets.remove(&pid);
+                                state.response_listeners.remove(&pid);
+                                state.codebases.remove(&pid);
+                            }
+                        } else {
+                            // For other requests, send on response socket
+                            if let Err(e) = send_response(&mut state, pid, &resp) {
+                                eprintln!("[PID {}] Failed to send response: {}", pid, e);
+                                // Clean up dead socket
+                                state.response_sockets.remove(&pid);
+                                state.response_listeners.remove(&pid);
+                                state.codebases.remove(&pid);
+                            }
                         }
                     }
                     Err(e) => {
@@ -279,8 +339,19 @@ fn main() -> Result<()> {
     println!("{}", "=".repeat(80));
     println!();
 
+    // Create shared state
+    let state = Arc::new(Mutex::new(ServiceState::new()));
+
     // Create channel for communication between listener and worker
     let (request_tx, request_rx) = bounded::<(Request, UnixStream)>(100);
+
+    // Spawn connection acceptor thread
+    let acceptor_state = Arc::clone(&state);
+    let acceptor_thread = thread::spawn(move || {
+        if let Err(e) = connection_acceptor(acceptor_state) {
+            eprintln!("Connection acceptor error: {}", e);
+        }
+    });
 
     // Spawn listener thread
     let listener_tx = request_tx.clone();
@@ -291,8 +362,9 @@ fn main() -> Result<()> {
     });
 
     // Spawn worker thread
+    let worker_state = Arc::clone(&state);
     let worker_thread = thread::spawn(move || {
-        if let Err(e) = request_worker(request_rx) {
+        if let Err(e) = request_worker(request_rx, worker_state) {
             eprintln!("Request worker error: {}", e);
         }
     });
@@ -303,6 +375,7 @@ fn main() -> Result<()> {
     // Wait for threads
     listener_thread.join().expect("Listener thread panicked");
     worker_thread.join().expect("Worker thread panicked");
+    acceptor_thread.join().expect("Acceptor thread panicked");
 
     // Cleanup
     let _ = fs::remove_file(REQUEST_SOCKET);
