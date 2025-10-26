@@ -189,7 +189,48 @@ fn send_response_on_stream(stream: &mut UnixStream, response: &Response) -> Resu
     Ok(())
 }
 
-/// Request listener thread - receives requests and adds to queue
+/// Handle a single client connection - can handle multiple requests
+fn handle_client_connection(mut stream: UnixStream, request_tx: Sender<(Request, UnixStream)>) {
+    loop {
+        // Create a new reader for each request to avoid borrowing issues
+        let mut reader = BufReader::new(&mut stream);
+        let mut line = String::new();
+
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                // Connection closed by client
+                break;
+            }
+            Ok(_) => {
+                match serde_json::from_str::<Request>(line.trim()) {
+                    Ok(request) => {
+                        println!("Received request: {:?}", request);
+                        // Clone the stream for the worker to use
+                        if let Ok(stream_clone) = stream.try_clone() {
+                            if let Err(e) = request_tx.send((request, stream_clone)) {
+                                eprintln!("Failed to send request to worker: {}", e);
+                                break;
+                            }
+                        } else {
+                            eprintln!("Failed to clone stream");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to parse request: {}", e);
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Error reading from client: {}", e);
+                break;
+            }
+        }
+    }
+}
+
+/// Request listener thread - accepts connections and spawns handlers
 fn request_listener(request_tx: Sender<(Request, UnixStream)>) -> Result<()> {
     // Remove old socket if it exists
     let _ = fs::remove_file(REQUEST_SOCKET);
@@ -202,29 +243,11 @@ fn request_listener(request_tx: Sender<(Request, UnixStream)>) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                // Read request from stream
-                let reader = BufReader::new(stream.try_clone()?);
-                for line in reader.lines() {
-                    match line {
-                        Ok(json_str) => {
-                            match serde_json::from_str::<Request>(&json_str) {
-                                Ok(request) => {
-                                    println!("Received request: {:?}", request);
-                                    if let Err(e) = request_tx.send((request, stream.try_clone()?)) {
-                                        eprintln!("Failed to send request to worker: {}", e);
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("Failed to parse request: {}", e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Error reading line: {}", e);
-                            break;
-                        }
-                    }
-                }
+                // Spawn a thread to handle this client connection
+                let tx = request_tx.clone();
+                thread::spawn(move || {
+                    handle_client_connection(stream, tx);
+                });
             }
             Err(e) => {
                 eprintln!("Connection error: {}", e);
